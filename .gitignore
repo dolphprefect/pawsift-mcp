@@ -1,0 +1,19 @@
+pawsift
+.pawsift/
+*.log
+build/
+dist/
+bin/
+vendor/
+
+# Agent Instruction Files
+GEMINI.md
+CLAUDE.md
+.cursorrules
+.windsurfrules
+.vscoderules
+
+# Ignore all hidden files and folders
+.*
+# But keep .gitignore
+!.gitignore
