@@ -12,7 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const Version = "1.3.1"
+const Version = "1.4.0"
 
 func splitMessage(msg string) (first, rest string) {
 	if i := strings.IndexByte(msg, '\n'); i >= 0 {
@@ -354,6 +354,42 @@ func main() {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to clear device logs: %v", err)), nil
 		}
 		return mcp.NewToolResultText("All logs have been cleared successfully (DB and Device)."), nil
+	})
+
+	// Set Retention Policy Tool
+	s.AddTool(mcp.NewTool("set_retention_policy",
+		mcp.WithDescription("Configure log retention limits: maximum total logs to keep, maximum sessions to retain, and cleanup interval in seconds."),
+		mcp.WithNumber("max_logs",
+			mcp.Description("Maximum total log entries to keep (e.g., 10000)"),
+			mcp.DefaultNumber(10000),
+		),
+		mcp.WithNumber("max_sessions",
+			mcp.Description("Maximum number of sessions to keep (e.g., 3)"),
+			mcp.DefaultNumber(3),
+		),
+		mcp.WithNumber("cleanup_interval",
+			mcp.Description("Cleanup interval in seconds (e.g., 30)"),
+			mcp.DefaultNumber(30),
+		),
+	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		maxLogs := request.GetInt("max_logs", 10000)
+		maxSessions := request.GetInt("max_sessions", 3)
+		cleanupInterval := request.GetInt("cleanup_interval", 30)
+
+		if maxLogs < 100 {
+			return mcp.NewToolResultError("max_logs must be at least 100"), nil
+		}
+		if maxSessions < 1 {
+			return mcp.NewToolResultError("max_sessions must be at least 1"), nil
+		}
+		if cleanupInterval < 5 {
+			return mcp.NewToolResultError("cleanup_interval must be at least 5 seconds"), nil
+		}
+
+		watcher.SetRetentionPolicy(maxLogs, maxSessions, cleanupInterval)
+		return mcp.NewToolResultText(fmt.Sprintf(
+			"Retention policy configured:\n- **Max Logs**: %d\n- **Max Sessions**: %d\n- **Cleanup Interval**: %d seconds",
+			maxLogs, maxSessions, cleanupInterval)), nil
 	})
 
 	// Get Status Tool

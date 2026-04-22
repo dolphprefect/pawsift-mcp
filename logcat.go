@@ -26,11 +26,17 @@ type Watcher struct {
 	deviceSerial   string
 	lastPoll       time.Time
 	isStarted      bool
+	retention      RetentionConfig
+	cleanupCounter int
 	mu             sync.Mutex
 }
 
 func NewWatcher(db *DB) *Watcher {
-	w := &Watcher{db: db, lastSeenKeys: map[string]bool{}}
+	w := &Watcher{
+		db:        db,
+		lastSeenKeys: map[string]bool{},
+		retention: DefaultRetentionConfig,
+	}
 	out, _ := exec.Command("adb", "get-serialno").Output()
 	w.deviceSerial = strings.TrimSpace(string(out))
 	if w.deviceSerial == "unknown" || w.deviceSerial == "" {
@@ -82,6 +88,11 @@ func (w *Watcher) pollWithTimeout() {
 
 	w.mu.Lock()
 	w.lastPoll = time.Now()
+	w.cleanupCounter++
+	shouldCleanup := w.cleanupCounter >= w.retention.CleanupInterval
+	if shouldCleanup {
+		w.cleanupCounter = 0
+	}
 	w.mu.Unlock()
 
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
@@ -90,6 +101,14 @@ func (w *Watcher) pollWithTimeout() {
 		line := scanner.Text()
 		if w.processLine(line) {
 			newLogs++
+		}
+	}
+
+	if shouldCleanup {
+		if err := w.db.Cleanup(w.retention); err != nil {
+			fmt.Fprintf(os.Stderr, "LOG: Cleanup error: %v\n", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "LOG: Cleanup completed successfully")
 		}
 	}
 }
@@ -166,6 +185,22 @@ func (w *Watcher) GetCurrentSession() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.currentSession
+}
+
+func (w *Watcher) SetRetentionPolicy(maxLogs, maxSessions, cleanupInterval int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.retention.MaxLogs = maxLogs
+	w.retention.MaxSessions = maxSessions
+	w.retention.CleanupInterval = cleanupInterval
+	fmt.Fprintf(os.Stderr, "LOG: Retention policy updated - MaxLogs=%d, MaxSessions=%d, CleanupInterval=%ds\n",
+		maxLogs, maxSessions, cleanupInterval)
+}
+
+func (w *Watcher) GetRetentionPolicy() RetentionConfig {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.retention
 }
 
 func (w *Watcher) ClearDeviceLogs() error {

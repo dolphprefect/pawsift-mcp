@@ -6,6 +6,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// RetentionConfig defines log retention policies
+type RetentionConfig struct {
+	MaxLogs         int // Maximum total log entries to keep
+	MaxSessions     int // Maximum number of sessions to keep
+	CleanupInterval int // Seconds between cleanup runs
+}
+
+// DefaultRetentionConfig provides sensible defaults for active debugging
+var DefaultRetentionConfig = RetentionConfig{
+	MaxLogs:         10000,
+	MaxSessions:     3,
+	CleanupInterval: 30,
+}
+
 type LogEntry struct {
 	ID        int64
 	SessionID int
@@ -54,6 +68,10 @@ func InitDB(path string) (*DB, error) {
 	);
 	CREATE INDEX IF NOT EXISTS idx_logs_session ON logs(session_id);
 	CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
+	CREATE INDEX IF NOT EXISTS idx_logs_tag ON logs(tag);
+	CREATE INDEX IF NOT EXISTS idx_logs_message ON logs(message);
+	CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_logs_session_level_tag ON logs(session_id, level, tag);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
@@ -313,10 +331,10 @@ func (d *DB) SearchFoldedLogs(query string, limit int) ([]FoldedLog, error) {
 		rawLimit = 1000
 	}
 
-	sql := `SELECT id, timestamp, level, tag, pid, message 
-	        FROM logs 
-			WHERE message LIKE ? 
-			ORDER BY id DESC 
+	sql := `SELECT id, timestamp, level, tag, pid, message
+	        FROM logs
+			WHERE message LIKE ?
+			ORDER BY id DESC
 			LIMIT ?`
 	rows, err := d.conn.Query(sql, "%"+query+"%", rawLimit)
 	if err != nil {
@@ -334,4 +352,69 @@ func (d *DB) SearchFoldedLogs(query string, limit int) ([]FoldedLog, error) {
 	}
 
 	return FoldLogEntries(entries, limit), nil
+}
+
+// Cleanup enforces retention policy: keeps max N logs and max M sessions
+func (d *DB) Cleanup(cfg RetentionConfig) error {
+	// First, delete oldest sessions if we exceed max
+	if cfg.MaxSessions > 0 {
+		if err := d.deleteOldestSessions(cfg.MaxSessions); err != nil {
+			return err
+		}
+	}
+
+	// Then, delete oldest logs if we exceed max
+	if cfg.MaxLogs > 0 {
+		if err := d.deleteOldestLogs(cfg.MaxLogs); err != nil {
+			return err
+		}
+	}
+
+	// Reclaim disk space
+	_, err := d.conn.Exec("VACUUM")
+	return err
+}
+
+// deleteOldestSessions removes sessions beyond the max count, keeping the newest ones
+func (d *DB) deleteOldestSessions(maxSessions int) error {
+	// Find how many sessions we have
+	var count int
+	if err := d.conn.QueryRow("SELECT COUNT(DISTINCT session_id) FROM logs").Scan(&count); err != nil {
+		return err
+	}
+
+	if count <= maxSessions {
+		return nil
+	}
+
+	// Find the session_id threshold: keep maxSessions, delete older
+	toDelete := count - maxSessions
+	var oldestSessionID int
+	err := d.conn.QueryRow(`
+		SELECT session_id FROM (
+			SELECT DISTINCT session_id FROM logs ORDER BY session_id ASC LIMIT ?
+		) ORDER BY session_id DESC LIMIT 1
+	`, toDelete).Scan(&oldestSessionID)
+	if err != nil {
+		return err
+	}
+
+	_, err = d.conn.Exec("DELETE FROM logs WHERE session_id <= ?", oldestSessionID)
+	return err
+}
+
+// deleteOldestLogs removes the oldest logs when total exceeds maxLogs
+func (d *DB) deleteOldestLogs(maxLogs int) error {
+	var count int
+	if err := d.conn.QueryRow("SELECT COUNT(*) FROM logs").Scan(&count); err != nil {
+		return err
+	}
+
+	if count <= maxLogs {
+		return nil
+	}
+
+	toDelete := count - maxLogs
+	_, err := d.conn.Exec("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY id ASC LIMIT ?)", toDelete)
+	return err
 }
