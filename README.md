@@ -11,6 +11,9 @@
 - **Contextual Windows**: Fetch logs surrounding a specific event for precise debugging.
 - **Global Search**: Search the entire log history across all sessions with a single command.
 - **Status Dashboard**: A specialized heartbeat tool to monitor watcher health, session IDs, and log backlog.
+- **Automatic Retention Policy**: Enforces max log limits (default 10k logs, 3 sessions) with continuous cleanup during polling—prevents unbounded database growth.
+- **Configurable Cleanup**: Adjust retention limits on-the-fly via `set_retention_policy()` without restarting.
+- **Optimized Queries**: Database indexes on tag, message, timestamp, and composite filters for fast lookups even with large log volumes.
 - **Maintenance**: Built-in tools to clear both local and device log buffers.
 - **Go-Based**: Fast, single-binary distribution with no CGO dependencies.
 
@@ -72,6 +75,28 @@ Don't query all logs. Use the **[ID]** from the summary to jump straight to the 
 > - If you see too much system noise (e.g., `WifiHAL`, `AOC`), tell the LLM: *"Ignore system tags and focus on my app logs."*
 > - Use `search_logs(query="FATAL EXCEPTION")` to find specific events across the entire history if the current session summary is too broad.
 
+## Retention Policy Management
+
+**PawSift** automatically manages database growth with a configurable retention policy. By default:
+- **Max 10,000 logs** are kept across all sessions
+- **Last 3 sessions** are retained; older ones are deleted
+- **Cleanup runs every 30 seconds** during polling to enforce limits
+
+### Adjusting Limits On-the-Fly
+
+Use `set_retention_policy()` to tune limits without restarting:
+
+```
+set_retention_policy(max_logs=5000, max_sessions=2, cleanup_interval=15)
+```
+
+**Use cases:**
+- **Long debugging session**: Reduce limits (5k logs, 2 sessions, 15s cleanup) to keep the database lean
+- **Quick reproduction**: Increase limits (50k logs, 5 sessions, 60s cleanup) if you need more historical context
+- **Tight constraints**: Minimal mode (1k logs, 1 session, 10s cleanup) for resource-constrained environments
+
+After each cleanup cycle, disk space is reclaimed via `VACUUM`.
+
 ## Configuration for MCP Clients
 
 `make deploy` handles this automatically for Gemini CLI and Claude Code (CLI). For manual setup or other clients, use the following:
@@ -89,6 +114,7 @@ Don't query all logs. Use the **[ID]** from the summary to jump straight to the 
 ## Housekeeping
 
 - **Binary Location**: `build/pawsift`
-- **Database**: `.pawsift/logcat.db` (automatically created)
+- **Database**: `.pawsift/logcat.db` (automatically created, SQLite with WAL mode and indexes for fast queries)
 - **Polling Rate**: 1 second (configurable in `logcat.go`)
+- **Retention Defaults**: 10,000 max logs, 3 max sessions, 30-second cleanup interval (configurable via `set_retention_policy()`)
 - **Version**: Check via `pawsift -version`
