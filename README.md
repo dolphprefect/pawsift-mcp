@@ -43,6 +43,20 @@ Builds from source and does the same install + registration as above.
 make uninstall
 ```
 
+## Tools
+
+| Tool | Description |
+|---|---|
+| `pawsift_set_target_package` | Configures the watcher to monitor a specific Android application. When this package starts, the session ID is automatically rotated to isolate new logs. |
+| `pawsift_get_status` | Returns the current status dashboard: target package, session ID, watcher activity, connected device, and current log count. |
+| `pawsift_get_error_summary` | Returns a count-first Markdown list of unique ERROR and FATAL logs with their latest `[ID]`. Use the ID for surgical context retrieval. |
+| `pawsift_get_tag_summary` | Returns a count-first Markdown list of all unique log tags in the current session. |
+| `pawsift_query_logs` | Retrieves filtered logs (by level and/or tag) using Hierarchical Mapping. Supports folding of consecutive identical messages. |
+| `pawsift_get_log_context` | Retrieves lines surrounding a specific log ID. Essential for seeing what led up to a crash or event. |
+| `pawsift_search_logs` | Performs a global search across the entire log history using Hierarchical Mapping. |
+| `pawsift_clear_logs` | Permanently deletes all logs from the database and clears the Android device logcat buffer. |
+| `pawsift_set_retention_policy` | Configure retention limits: maximum total logs, maximum sessions to keep, and cleanup interval in seconds. |
+
 ## Debugging Workflow
 
 **PawSift** provides an intelligent abstraction layer over raw Android logs, optimized for AI-assisted debugging. Follow this workflow for the best results:
@@ -50,11 +64,11 @@ make uninstall
 ### 1. Setup the Target
 Before you start testing, tell **PawSift** which app you are focusing on:
 > *User to LLM:* "Set the target package to `com.your.app.package` and watch for logs."
-> *LLM Action:* Calls `set_target_package(package="com.your.app.package")`.
+> *LLM Action:* Calls `pawsift_set_target_package(package="com.your.app.package")`.
 
 ### 2. Verify State
 Orient yourself before starting a deep dive:
-> *LLM Action:* Calls `get_status()`.
+> *LLM Action:* Calls `pawsift_get_status()`.
 > *Output:* Shows if the watcher is active, the connected device serial, and the current log count.
 
 ### 3. Trigger the Issue
@@ -63,17 +77,17 @@ Run your app on your device or emulator. **PawSift** will automatically detect t
 ### 4. Identify the Crash (The "Bird's Eye View")
 If the app crashes or behaves unexpectedly, start with a high-level summary to save tokens:
 > *User to LLM:* "What just happened? Any crashes?"
-> *LLM Action:* Calls `get_error_summary()`.
+> *LLM Action:* Calls `pawsift_get_error_summary()`.
 > *Output:* Returns unique error signatures, counts, and their latest **[ID]**.
 
 ### 5. Investigate the Logs (Surgical Follow-up)
 Don't query all logs. Use the **[ID]** from the summary to jump straight to the relevant context:
-> *LLM Action:* Calls `get_log_context(log_id=1234, lines=20)`.
+> *LLM Action:* Calls `pawsift_get_log_context(log_id=1234, lines=20)`.
 > *Output:* Returns 20 lines leading up to and following the crash, giving you visibility into state changes, network responses, or UI events.
 
 > **Pro Tip: Suppression & Search**
 > - If you see too much system noise (e.g., `WifiHAL`, `AOC`), tell the LLM: *"Ignore system tags and focus on my app logs."*
-> - Use `search_logs(query="FATAL EXCEPTION")` to find specific events across the entire history if the current session summary is too broad.
+> - Use `pawsift_search_logs(query="FATAL EXCEPTION")` to find specific events across the entire history if the current session summary is too broad.
 
 ## Retention Policy Management
 
@@ -84,10 +98,10 @@ Don't query all logs. Use the **[ID]** from the summary to jump straight to the 
 
 ### Adjusting Limits On-the-Fly
 
-Use `set_retention_policy()` to tune limits without restarting:
+Use `pawsift_set_retention_policy()` to tune limits without restarting:
 
 ```
-set_retention_policy(max_logs=5000, max_sessions=2, cleanup_interval=15)
+pawsift_set_retention_policy(max_logs=5000, max_sessions=2, cleanup_interval=15)
 ```
 
 **Use cases:**
