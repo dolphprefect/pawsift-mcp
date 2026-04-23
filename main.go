@@ -12,7 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const Version = "1.4.0"
+const Version = "1.5.0"
 
 func splitMessage(msg string) (first, rest string) {
 	if i := strings.IndexByte(msg, '\n'); i >= 0 {
@@ -69,7 +69,7 @@ func main() {
 	)
 
 	// Set Target Package Tool
-	s.AddTool(mcp.NewTool("set_target_package",
+	s.AddTool(mcp.NewTool("pawsift_set_target_package",
 		mcp.WithDescription("Configures the watcher to monitor a specific Android application. When this package starts, the server automatically increments the session ID to isolate new logs."),
 		mcp.WithString("package",
 			mcp.Description("The Android package name (e.g., com.example.app)"),
@@ -85,7 +85,7 @@ func main() {
 	})
 
 	// Get Error Summary Tool
-	s.AddTool(mcp.NewTool("get_error_summary",
+	s.AddTool(mcp.NewTool("pawsift_get_error_summary",
 		mcp.WithDescription("Returns a Count-First Markdown list of unique ERROR and FATAL logs with their latest [ID]. Each item follows the format: '- [ID] **Count x** [Tag] Message'. Use the [ID] for surgical context retrieval."),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sessionID := watcher.GetCurrentSession()
@@ -97,7 +97,7 @@ func main() {
 	})
 
 	// Get Tag Summary Tool
-	s.AddTool(mcp.NewTool("get_tag_summary",
+	s.AddTool(mcp.NewTool("pawsift_get_tag_summary",
 		mcp.WithDescription("Returns a Count-First Markdown list of all unique log tags in the current session. Each item follows the format: '- **Count** Tag'."),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sessionID := watcher.GetCurrentSession()
@@ -109,7 +109,7 @@ func main() {
 	})
 
 	// Query Logs Tool
-	s.AddTool(mcp.NewTool("query_logs",
+	s.AddTool(mcp.NewTool("pawsift_query_logs",
 		mcp.WithDescription("Retrieves filtered logs using Hierarchical Mapping (groups identical messages under sub-headers to save tokens). AVOID using this for crash investigation if you already have an error [ID]—use get_log_context() instead."),
 		mcp.WithString("level", mcp.Description("Filter by log level: V (Verbose), D (Debug), I (Info), W (Warn), E (Error), F (Fatal)")),
 		mcp.WithString("tag", mcp.Description("Filter by tag name (substring match)")),
@@ -201,7 +201,7 @@ func main() {
 	})
 
 	// Get Log Context Tool
-	s.AddTool(mcp.NewTool("get_log_context",
+	s.AddTool(mcp.NewTool("pawsift_get_log_context",
 		mcp.WithDescription("Retrieves lines surrounding a specific log ID. Essential for seeing what led up to a crash or event."),
 		mcp.WithNumber("log_id",
 			mcp.Description("The ID of the log entry (from query_logs) to center the window on"),
@@ -257,7 +257,7 @@ func main() {
 	})
 
 	// Search Logs Tool
-	s.AddTool(mcp.NewTool("search_logs",
+	s.AddTool(mcp.NewTool("pawsift_search_logs",
 		mcp.WithDescription("Performs a global search using Hierarchical Mapping (groups identical messages under sub-headers to save tokens). Use fold=false to see individual timestamps and IDs for repetitive events."),
 		mcp.WithString("query", mcp.Description("Substring to search for in log messages"), mcp.Required()),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 25)"), mcp.DefaultNumber(25)),
@@ -344,7 +344,7 @@ func main() {
 	})
 
 	// Clear Logs Tool
-	s.AddTool(mcp.NewTool("clear_logs",
+	s.AddTool(mcp.NewTool("pawsift_clear_logs",
 		mcp.WithDescription("Permanently deletes all logs from the database AND clears the Android device logcat buffer. Use this to start fresh or fix startup lag."),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if err := db.ClearLogs(); err != nil {
@@ -357,7 +357,7 @@ func main() {
 	})
 
 	// Set Retention Policy Tool
-	s.AddTool(mcp.NewTool("set_retention_policy",
+	s.AddTool(mcp.NewTool("pawsift_set_retention_policy",
 		mcp.WithDescription("Configure log retention limits: maximum total logs to keep, maximum sessions to retain, and cleanup interval in seconds."),
 		mcp.WithNumber("max_logs",
 			mcp.Description("Maximum total log entries to keep (e.g., 10000)"),
@@ -393,7 +393,7 @@ func main() {
 	})
 
 	// Get Status Tool
-	s.AddTool(mcp.NewTool("get_status",
+	s.AddTool(mcp.NewTool("pawsift_get_status",
 		mcp.WithDescription("Returns the current status of the PawSift dashboard, including the target package, session ID, watcher activity, and connected device info."),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		info := watcher.GetInfo()
