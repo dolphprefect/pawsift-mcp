@@ -57,6 +57,41 @@ make uninstall
 | `pawsift_clear_logs` | Permanently deletes all logs from the database and clears the Android device logcat buffer. |
 | `pawsift_set_retention_policy` | Configure retention limits: maximum total logs, maximum sessions to keep, and cleanup interval in seconds. |
 
+## Token Efficiency
+
+Android logs are extremely verbose. A single app launch can produce thousands of lines, most of them repetitive noise. Feeding raw logcat into an LLM context is wasteful and often hits limits. PawSift addresses this at two levels.
+
+### Folding
+
+When `fold=true` (the default in `pawsift_query_logs` and `pawsift_search_logs`), consecutive identical log messages are collapsed into a single entry annotated with a count and time range:
+
+```
+- [1042-1089] **D** 09:14.201 - 09:14.812 Choreographer: Skipped 48 frames (48x)
+```
+
+Without folding, that same stretch would emit 48 separate lines. A busy app with repeated WiFi probes, sensor polling, or animation callbacks can compress 200+ raw lines down to a handful of folded entries — a 10–50× reduction in tokens for those spans.
+
+### Hierarchical Mapping
+
+Beyond folding, results are structured using **Hierarchical Mapping**: logs are grouped first by tag and PID (`### Tag (PID)`), then by unique message (`#### Message`), with individual occurrences listed underneath. This means the LLM receives a structured summary rather than a flat stream:
+
+```
+### MyApp (12345)
+#### Failed to load resource
+- [301] **E** 09:15.001
+- [318] **E** 09:15.430
+
+### NetworkManager (987)
+#### Socket timeout
+- [412] **W** 09:15.102
+```
+
+Repeated messages from the same source appear once as a header with their occurrences listed below, rather than duplicating the message text on every line.
+
+### ID-Based Surgical Access
+
+Every log entry carries a stable `[ID]`. The summary tools (`pawsift_get_error_summary`, `pawsift_get_tag_summary`) return only counts and IDs — not the full log body. Once you have an ID of interest, `pawsift_get_log_context` fetches just the surrounding window. This two-step pattern (summarise → zoom) avoids loading the full log history into context entirely.
+
 ## Debugging Workflow
 
 **PawSift** provides an intelligent abstraction layer over raw Android logs, optimized for AI-assisted debugging. Follow this workflow for the best results:
