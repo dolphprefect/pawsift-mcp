@@ -21,13 +21,19 @@
 
 ### Prebuilt binary (recommended)
 
+**Linux / macOS**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DolphRoger/pawsift/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/dolphprefect/pawsift-mcp/main/install.sh | sh
 ```
 
-Downloads the right binary for your OS and architecture, installs it to `~/.local/bin/pawsift`, and **automatically registers** the server in your Gemini CLI and Claude Code (CLI) configuration files.
+**Windows (PowerShell)**
+```powershell
+irm https://raw.githubusercontent.com/dolphprefect/pawsift-mcp/main/install.ps1 | iex
+```
 
-Supports: Linux amd64/arm64, macOS amd64/arm64.
+Downloads the right binary for your OS and architecture, installs it to `~/.local/bin/pawsift` (or `%USERPROFILE%\.local\bin\pawsift.exe` on Windows), and **automatically registers** the server in your Gemini CLI and Claude Code (CLI) configuration files.
+
+Supports: Linux amd64/arm64, macOS amd64/arm64, Windows amd64.
 
 ### From source
 

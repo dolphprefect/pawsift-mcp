@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="DolphRoger/pawsift"
+REPO="dolphprefect/pawsift-mcp"
 INSTALL_DIR="$HOME/.local/bin"
 BINARY="pawsift"
 

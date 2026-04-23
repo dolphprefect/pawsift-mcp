@@ -4,7 +4,7 @@ INSTALL_DIR=$(HOME)/.local/bin
 GEMINI_CONFIG=$(HOME)/.gemini/settings.json
 CLAUDE_CODE_CONFIG=$(HOME)/.claude.json
 
-PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 VERSION    := $(shell grep 'Version = ' main.go | sed 's/.*"\(.*\)".*/\1/')
 
 .PHONY: all build build-all clean install deploy register uninstall release
@@ -22,7 +22,8 @@ build-all:
 		OS=$$(echo $$platform | cut -d/ -f1); \
 		ARCH=$$(echo $$platform | cut -d/ -f2); \
 		echo "  $$OS/$$ARCH..."; \
-		GOOS=$$OS GOARCH=$$ARCH go build -o $(BUILD_DIR)/$(BINARY_NAME)-$$OS-$$ARCH .; \
+		EXT=$$( [ "$$OS" = "windows" ] && echo ".exe" || echo "" ); \
+		GOOS=$$OS GOARCH=$$ARCH go build -o $(BUILD_DIR)/$(BINARY_NAME)-$$OS-$$ARCH$$EXT .; \
 	done
 	@echo "Done."
 
@@ -33,6 +34,7 @@ release: build-all
 		$(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 \
 		$(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 \
 		$(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 \
+		$(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe \
 		--title "v$(VERSION)" \
 		--generate-notes
 
