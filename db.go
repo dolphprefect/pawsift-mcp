@@ -385,7 +385,13 @@ func (d *DB) Cleanup(cfg RetentionConfig) error {
 		}
 	}
 
-	return nil
+	// Reclaim freed pages so the db file doesn't grow unbounded over delete cycles.
+	// VACUUM rewrites the db; wal_checkpoint(TRUNCATE) then shrinks the WAL file.
+	if _, err := d.conn.Exec("VACUUM"); err != nil {
+		return err
+	}
+	_, err := d.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	return err
 }
 
 // deleteOldestSessions removes sessions beyond the max count, keeping the newest ones
