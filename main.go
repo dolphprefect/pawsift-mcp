@@ -12,7 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const Version = "1.5.0"
+const Version = "1.5.1"
 
 func splitMessage(msg string) (first, rest string) {
 	if i := strings.IndexByte(msg, '\n'); i >= 0 {

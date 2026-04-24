@@ -53,9 +53,16 @@ func InitDB(path string) (*DB, error) {
 		return nil, err
 	}
 
+	// Single connection serializes all writes and prevents WAL bloat: multiple
+	// open connections block SQLite's auto-checkpoint, causing the WAL to grow
+	// unbounded until all writes stall.
+	db.SetMaxOpenConns(1)
+
 	schema := `
 	PRAGMA journal_mode=WAL;
 	PRAGMA synchronous=NORMAL;
+	PRAGMA busy_timeout=5000;
+	PRAGMA wal_autocheckpoint=100;
 	CREATE TABLE IF NOT EXISTS logs (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		session_id INTEGER,
@@ -263,7 +270,15 @@ func (d *DB) QueryFoldedLogs(sessionID int, level string, tag string, limit int)
 }
 
 func (d *DB) ClearLogs() error {
-	_, err := d.conn.Exec("DELETE FROM logs")
+	if _, err := d.conn.Exec("DELETE FROM logs"); err != nil {
+		return err
+	}
+	// VACUUM shrinks the db file back to near-zero; must run before the WAL
+	// checkpoint so the truncation captures the reclaimed pages too.
+	if _, err := d.conn.Exec("VACUUM"); err != nil {
+		return err
+	}
+	_, err := d.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return err
 }
 
@@ -370,9 +385,7 @@ func (d *DB) Cleanup(cfg RetentionConfig) error {
 		}
 	}
 
-	// Reclaim disk space
-	_, err := d.conn.Exec("VACUUM")
-	return err
+	return nil
 }
 
 // deleteOldestSessions removes sessions beyond the max count, keeping the newest ones
