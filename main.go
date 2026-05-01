@@ -14,11 +14,65 @@ import (
 
 const Version = "1.5.2"
 
-func splitMessage(msg string) (first, rest string) {
-	if i := strings.IndexByte(msg, '\n'); i >= 0 {
-		return msg[:i], msg[i+1:]
+func renderLogEntries(sb *strings.Builder, entries []LogEntry, centerID int64) {
+	lastHeader := ""
+	lastMsg := ""
+
+	for _, e := range entries {
+		header := fmt.Sprintf("%s (%d)", e.Tag, e.PID)
+		if header != lastHeader {
+			sb.WriteString(fmt.Sprintf("### %s\n", header))
+			lastHeader = header
+			lastMsg = ""
+		}
+
+		ts := e.Timestamp
+		if len(ts) > 6 {
+			ts = ts[6:]
+		}
+
+		firstLine, trace, _ := strings.Cut(e.Message, "\n")
+		if firstLine != lastMsg {
+			sb.WriteString(fmt.Sprintf("#### %s\n", firstLine))
+			lastMsg = firstLine
+		}
+
+		prefix := "- "
+		if e.ID == centerID {
+			prefix = "> - "
+		}
+		sb.WriteString(fmt.Sprintf("%s[%d] **%s** %s\n", prefix, e.ID, e.Level, ts))
+		sb.WriteString(indentTrace(trace))
 	}
-	return msg, ""
+}
+
+func renderFoldedLogEntries(sb *strings.Builder, entries []FoldedLog) {
+	lastHeader := ""
+
+	for _, e := range entries {
+		header := fmt.Sprintf("%s (%d)", e.Tag, e.PID)
+		if header != lastHeader {
+			sb.WriteString(fmt.Sprintf("### %s\n", header))
+			lastHeader = header
+		}
+
+		startTs := e.StartTime
+		if len(startTs) > 6 {
+			startTs = startTs[6:]
+		}
+		endTs := e.EndTime
+		if len(endTs) > 6 {
+			endTs = endTs[6:]
+		}
+
+		firstLine, _, _ := strings.Cut(e.Message, "\n")
+		if e.Count > 1 {
+			sb.WriteString(fmt.Sprintf("- [%d-%d] **%s** %s - %s %s (%dx)\n", e.StartID, e.EndID, e.Level, startTs, endTs, firstLine, e.Count))
+		} else {
+			sb.WriteString(fmt.Sprintf("- [%d] **%s** %s %s\n", e.StartID, e.Level, startTs, firstLine))
+			// Note: Folded logs generally don't show full traces for space, but we could add if needed
+		}
+	}
 }
 
 func indentTrace(trace string) string {
@@ -131,73 +185,26 @@ func main() {
 			limit = 50
 		}
 
-		result := ""
-		lastHeader := ""
-		lastMsg := ""
+		var sb strings.Builder
 
 		if !fold {
 			entries, err := db.QueryLogs(sessionID, level, tag, limit)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Database error: %v", err)), nil
 			}
-
-			for _, e := range entries {
-				header := fmt.Sprintf("%s (%d)", e.Tag, e.PID)
-				if header != lastHeader {
-					result += fmt.Sprintf("### %s\n", header)
-					lastHeader = header
-					lastMsg = ""
-				}
-
-				ts := e.Timestamp
-				if len(ts) > 6 {
-					ts = ts[6:]
-				}
-
-				firstLine, trace := splitMessage(e.Message)
-				if firstLine != lastMsg {
-					result += fmt.Sprintf("#### %s\n", firstLine)
-					lastMsg = firstLine
-				}
-				result += fmt.Sprintf("- [%d] **%s** %s\n", e.ID, e.Level, ts)
-				result += indentTrace(trace)
-			}
+			renderLogEntries(&sb, entries, 0)
 		} else {
 			entries, err := db.QueryFoldedLogs(sessionID, level, tag, limit)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Database error: %v", err)), nil
 			}
-
-			for _, e := range entries {
-				header := fmt.Sprintf("%s (%d)", e.Tag, e.PID)
-				if header != lastHeader {
-					result += fmt.Sprintf("### %s\n", header)
-					lastHeader = header
-				}
-
-				startTs := e.StartTime
-				if len(startTs) > 6 {
-					startTs = startTs[6:]
-				}
-				endTs := e.EndTime
-				if len(endTs) > 6 {
-					endTs = endTs[6:]
-				}
-
-				firstLine, trace := splitMessage(e.Message)
-				if e.Count > 1 {
-					result += fmt.Sprintf("- [%d-%d] **%s** %s - %s %s (%dx)\n", e.StartID, e.EndID, e.Level, startTs, endTs, firstLine, e.Count)
-				} else {
-					result += fmt.Sprintf("- [%d] **%s** %s %s\n", e.StartID, e.Level, startTs, firstLine)
-					result += indentTrace(trace)
-				}
-			}
+			renderFoldedLogEntries(&sb, entries)
 		}
 
-		if result == "" {
+		if sb.Len() == 0 {
 			return mcp.NewToolResultText("No logs found matching criteria in the current session."), nil
 		}
-		return mcp.NewToolResultText(result), nil
+		return mcp.NewToolResultText(sb.String()), nil
 	})
 
 	// Get Log Context Tool
@@ -223,37 +230,13 @@ func main() {
 			return mcp.NewToolResultError(fmt.Sprintf("Database error: %v", err)), nil
 		}
 
-		result := ""
-		lastHeader := ""
-		lastMsg := ""
+		var sb strings.Builder
+		renderLogEntries(&sb, entries, int64(logID))
 
-		for _, e := range entries {
-			header := fmt.Sprintf("%s (%d)", e.Tag, e.PID)
-			if header != lastHeader {
-				result += fmt.Sprintf("### %s\n", header)
-				lastHeader = header
-				lastMsg = ""
-			}
-
-			ts := e.Timestamp
-			if len(ts) > 6 {
-				ts = ts[6:]
-			}
-
-			firstLine, trace := splitMessage(e.Message)
-			if firstLine != lastMsg {
-				result += fmt.Sprintf("#### %s\n", firstLine)
-				lastMsg = firstLine
-			}
-
-			prefix := "- "
-			if e.ID == int64(logID) {
-				prefix = "> - "
-			}
-			result += fmt.Sprintf("%s[%d] **%s** %s\n", prefix, e.ID, e.Level, ts)
-			result += indentTrace(trace)
+		if sb.Len() == 0 {
+			return mcp.NewToolResultText("Log entry not found."), nil
 		}
-		return mcp.NewToolResultText(result), nil
+		return mcp.NewToolResultText(sb.String()), nil
 	})
 
 	// Search Logs Tool
@@ -270,77 +253,29 @@ func main() {
 			limit = 50
 		}
 
-
-		result := ""
-		lastHeader := ""
-		lastMsg := ""
+		var sb strings.Builder
 
 		if !fold {
 			entries, err := db.SearchLogs(query, limit)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Database error: %v", err)), nil
 			}
-
-			for _, e := range entries {
-				header := fmt.Sprintf("%s (%d)", e.Tag, e.PID)
-				if header != lastHeader {
-					result += fmt.Sprintf("### %s\n", header)
-					lastHeader = header
-					lastMsg = ""
-				}
-
-				ts := e.Timestamp
-				if len(ts) > 6 {
-					ts = ts[6:]
-				}
-
-				firstLine, trace := splitMessage(e.Message)
-				if firstLine != lastMsg {
-					result += fmt.Sprintf("#### %s\n", firstLine)
-					lastMsg = firstLine
-				}
-				result += fmt.Sprintf("- [%d] **%s** %s\n", e.ID, e.Level, ts)
-				result += indentTrace(trace)
-			}
+			renderLogEntries(&sb, entries, 0)
 		} else {
 			entries, err := db.SearchFoldedLogs(query, limit)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Database error: %v", err)), nil
 			}
-
-			for _, e := range entries {
-				header := fmt.Sprintf("%s (%d)", e.Tag, e.PID)
-				if header != lastHeader {
-					result += fmt.Sprintf("### %s\n", header)
-					lastHeader = header
-				}
-
-				startTs := e.StartTime
-				if len(startTs) > 6 {
-					startTs = startTs[6:]
-				}
-				endTs := e.EndTime
-				if len(endTs) > 6 {
-					endTs = endTs[6:]
-				}
-
-				firstLine, trace := splitMessage(e.Message)
-				if e.Count > 1 {
-					result += fmt.Sprintf("- [%d-%d] **%s** %s - %s %s (%dx)\n", e.StartID, e.EndID, e.Level, startTs, endTs, firstLine, e.Count)
-				} else {
-					result += fmt.Sprintf("- [%d] **%s** %s %s\n", e.StartID, e.Level, startTs, firstLine)
-					result += indentTrace(trace)
-				}
-			}
+			renderFoldedLogEntries(&sb, entries)
 		}
 
-		if result == "" {
+		if sb.Len() == 0 {
 			return mcp.NewToolResultText("No logs found matching the query."), nil
 		}
 
 		// Add a hint if we hit the limit
-		result += "\n*Note: Output capped at the most recent results. Use a more specific query if needed.*"
-		return mcp.NewToolResultText(result), nil
+		sb.WriteString("\n*Note: Output capped at the most recent results. Use a more specific query if needed.*")
+		return mcp.NewToolResultText(sb.String()), nil
 	})
 
 	// Clear Logs Tool
@@ -399,23 +334,25 @@ func main() {
 		info := watcher.GetInfo()
 		count, _ := db.GetLogCount(info.CurrentSession)
 
-		status := "### PawSift Status Dashboard\n"
+		var sb strings.Builder
+		sb.WriteString("### PawSift Status Dashboard\n")
+		
 		pkg := info.TargetPackage
 		if pkg == "" {
 			pkg = "None (System-wide)"
 		}
-		status += fmt.Sprintf("- **Target Package**: %s\n", pkg)
-		status += fmt.Sprintf("- **Session ID**: %d\n", info.CurrentSession)
+		sb.WriteString(fmt.Sprintf("- **Target Package**: %s\n", pkg))
+		sb.WriteString(fmt.Sprintf("- **Session ID**: %d\n", info.CurrentSession))
 		
 		activeStatus := "🔴 Inactive"
 		if info.IsActive {
 			activeStatus = "🟢 Active"
 		}
-		status += fmt.Sprintf("- **Watcher Status**: %s\n", activeStatus)
-		status += fmt.Sprintf("- **Connected Device**: %s\n", info.DeviceSerial)
-		status += fmt.Sprintf("- **Current Session Logs**: %d rows\n", count)
+		sb.WriteString(fmt.Sprintf("- **Watcher Status**: %s\n", activeStatus))
+		sb.WriteString(fmt.Sprintf("- **Connected Device**: %s\n", info.DeviceSerial))
+		sb.WriteString(fmt.Sprintf("- **Current Session Logs**: %d rows\n", count))
 
-		return mcp.NewToolResultText(status), nil
+		return mcp.NewToolResultText(sb.String()), nil
 	})
 
 	if err := server.ServeStdio(s); err != nil {

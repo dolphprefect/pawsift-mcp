@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,15 +28,18 @@ type Watcher struct {
 	lastPoll       time.Time
 	isStarted      bool
 	retention      RetentionConfig
-	cleanupCounter int
+	cmd            *exec.Cmd
+	isAdbRunning   bool
+	isCleaning     atomic.Bool
 	mu             sync.Mutex
 }
 
 func NewWatcher(db *DB) *Watcher {
 	w := &Watcher{
-		db:        db,
-		lastSeenKeys: map[string]bool{},
-		retention: DefaultRetentionConfig,
+		db:            db,
+		lastSeenKeys:  map[string]bool{},
+		retention:     DefaultRetentionConfig,
+		lastTimestamp: db.GetLastTimestamp(),
 	}
 	out, _ := exec.Command("adb", "get-serialno").Output()
 	w.deviceSerial = strings.TrimSpace(string(out))
@@ -53,62 +57,122 @@ func (w *Watcher) SetTargetPackage(pkg string) {
 }
 
 func (w *Watcher) Start(ctx context.Context) error {
-	fmt.Fprintln(os.Stderr, "LOG: Starting Fail-Fast Polling Watcher...")
+	fmt.Fprintln(os.Stderr, "LOG: Starting Streaming Watcher...")
 	w.mu.Lock()
 	w.isStarted = true
 	w.mu.Unlock()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticker.C:
-			w.pollWithTimeout()
+		default:
+			if err := w.streamWithRetry(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "LOG: Watcher stream error: %v. Restarting in 2s...\n", err)
+			}
+			// Always wait 2s before restarting to prevent CPU-maxing tight loops on EOF
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(2 * time.Second):
+				continue
+			}
 		}
 	}
 }
 
-func (w *Watcher) pollWithTimeout() {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func (w *Watcher) streamWithRetry(ctx context.Context) error {
+	localCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "adb", "logcat", "-v", "threadtime", "-d")
-	out, err := cmd.CombinedOutput()
+	args := []string{"logcat", "-v", "threadtime"}
+	if w.deviceSerial != "" && w.deviceSerial != "No device connected" {
+		args = append([]string{"-s", w.deviceSerial}, args...)
+	}
+	cmd := exec.CommandContext(localCtx, "adb", args...)
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			fmt.Fprintln(os.Stderr, "LOG: adb poll TIMEOUT (2s)")
-		} else {
-			fmt.Fprintf(os.Stderr, "LOG: adb poll ERROR: %v\n", err)
-		}
-		return
+		return err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return err
 	}
 
 	w.mu.Lock()
-	w.lastPoll = time.Now()
-	w.cleanupCounter++
-	shouldCleanup := w.cleanupCounter >= w.retention.CleanupInterval
-	if shouldCleanup {
-		w.cleanupCounter = 0
-	}
+	w.cmd = cmd
+	w.isAdbRunning = true
 	w.mu.Unlock()
 
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	newLogs := 0
-	for scanner.Scan() {
-		line := scanner.Text()
-		if w.processLine(line) {
-			newLogs++
-		}
-	}
+	done := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		w.mu.Lock()
+		w.isAdbRunning = false
+		w.mu.Unlock()
+		done <- err
+	}()
 
-	if shouldCleanup {
-		if err := w.db.Cleanup(w.retention); err != nil {
-			fmt.Fprintf(os.Stderr, "LOG: Cleanup error: %v\n", err)
-		} else {
-			fmt.Fprintln(os.Stderr, "LOG: Cleanup completed successfully")
+	lines := make(chan string, 100)
+	scanner := bufio.NewScanner(stdout)
+	go func() {
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-localCtx.Done():
+				return
+			}
+		}
+		close(lines)
+	}()
+
+	// Use a fast static ticker and check the retention interval on every tick.
+	// This ensures we pick up config changes quickly.
+	cleanupTicker := time.NewTicker(5 * time.Second)
+	defer cleanupTicker.Stop()
+	lastCleanup := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-done:
+			return fmt.Errorf("adb process exited: %w", err)
+		case <-cleanupTicker.C:
+			w.mu.Lock()
+			retention := w.retention
+			w.mu.Unlock()
+
+			interval := time.Duration(retention.CleanupInterval) * time.Second
+			if time.Since(lastCleanup) >= interval {
+				// Prevent overlapping cleanups
+				if w.isCleaning.CompareAndSwap(false, true) {
+					lastCleanup = time.Now()
+					go func(r RetentionConfig) {
+						defer w.isCleaning.Store(false)
+						if err := w.db.Cleanup(r); err != nil {
+							fmt.Fprintf(os.Stderr, "LOG: Cleanup error: %v\n", err)
+						} else {
+							fmt.Fprintln(os.Stderr, "LOG: Cleanup completed successfully")
+						}
+					}(retention)
+				}
+			}
+		case line, ok := <-lines:
+			if !ok {
+				if err := scanner.Err(); err != nil {
+					// scanner error: read /dev/stdin: file already closed is expected on close
+					if !strings.Contains(err.Error(), "file already closed") {
+						return fmt.Errorf("scanner error: %w", err)
+					}
+				}
+				return nil
+			}
+			w.processLine(line)
+
+			w.mu.Lock()
+			w.lastPoll = time.Now()
+			w.mu.Unlock()
 		}
 	}
 }
@@ -121,6 +185,7 @@ func (w *Watcher) processLine(line string) bool {
 
 	ts := matches[1]
 	w.mu.Lock()
+
 	if ts < w.lastTimestamp {
 		w.mu.Unlock()
 		return false
@@ -131,37 +196,46 @@ func (w *Watcher) processLine(line string) bool {
 	}
 	if ts > w.lastTimestamp {
 		w.lastTimestamp = ts
-		w.lastSeenKeys = map[string]bool{}
+		clear(w.lastSeenKeys)
 	}
 	w.lastSeenKeys[line] = true
 	pkg := w.targetPackage
 	sessionID := w.currentSession
-	w.mu.Unlock()
 
 	level := matches[4]
 	tag := strings.TrimSpace(matches[5])
 	message := matches[6]
-	pid, _ := strconv.Atoi(matches[2])
-	tid, _ := strconv.Atoi(matches[3])
+	pid, err := strconv.Atoi(matches[2])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: PID overflow or parse error: %v. Falling back to 0.\n", err)
+		pid = 0
+	}
+	tid, err := strconv.Atoi(matches[3])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: TID overflow or parse error: %v. Falling back to 0.\n", err)
+		tid = 0
+	}
 
-	isRestart := tag == "ActivityManager" && pkg != "" && strings.Contains(message, pkg) &&
+	isRestart := (tag == "ActivityManager" || tag == "ActivityTaskManager") && pkg != "" && strings.Contains(message, pkg) &&
 		(strings.Contains(message, "Start proc") || strings.Contains(message, "Killing") || strings.Contains(message, "Force stopping"))
 
 	if isRestart {
-		w.mu.Lock()
 		w.currentSession++
 		sessionID = w.currentSession
-		w.mu.Unlock()
 		fmt.Fprintf(os.Stderr, "LOG: Session Restarted (%d) for %s\n", sessionID, pkg)
 		w.lastEntryID = 0
 		w.lastEntryKey = ""
 	}
 
+	lastID := w.lastEntryID
+	lastKey := w.lastEntryKey
+	w.mu.Unlock()
+
 	// Group consecutive lines with identical (session, level, tag, pid, tid, timestamp)
 	// into a single DB entry — captures full exception stack traces as one record.
 	entryKey := fmt.Sprintf("%d|%s|%s|%d|%d|%s", sessionID, level, tag, pid, tid, ts)
-	if w.lastEntryID != 0 && entryKey == w.lastEntryKey {
-		_ = w.db.AppendToLog(w.lastEntryID, message)
+	if lastID != 0 && entryKey == lastKey {
+		_ = w.db.AppendToLog(lastID, message)
 		return true
 	}
 
@@ -176,8 +250,12 @@ func (w *Watcher) processLine(line string) bool {
 	}
 
 	id, _ := w.db.InsertLog(entry)
+
+	w.mu.Lock()
 	w.lastEntryID = id
 	w.lastEntryKey = entryKey
+	w.mu.Unlock()
+
 	return true
 }
 
@@ -206,8 +284,15 @@ func (w *Watcher) GetRetentionPolicy() RetentionConfig {
 func (w *Watcher) ClearDeviceLogs() error {
 	w.mu.Lock()
 	w.lastTimestamp = ""
+	clear(w.lastSeenKeys)
+	serial := w.deviceSerial
 	w.mu.Unlock()
-	return exec.Command("adb", "logcat", "-c").Run()
+
+	args := []string{"logcat", "-c"}
+	if serial != "" && serial != "No device connected" {
+		args = append([]string{"-s", serial}, args...)
+	}
+	return exec.Command("adb", args...).Run()
 }
 
 type WatcherInfo struct {
@@ -221,9 +306,9 @@ type WatcherInfo struct {
 func (w *Watcher) GetInfo() WatcherInfo {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	
-	isActive := w.isStarted && time.Since(w.lastPoll) < 5*time.Second
-	
+
+	isActive := w.isStarted && w.isAdbRunning
+
 	return WatcherInfo{
 		TargetPackage:  w.targetPackage,
 		CurrentSession: w.currentSession,

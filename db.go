@@ -369,6 +369,15 @@ func (d *DB) SearchFoldedLogs(query string, limit int) ([]FoldedLog, error) {
 	return FoldLogEntries(entries, limit), nil
 }
 
+func (d *DB) GetLastTimestamp() string {
+	var ts string
+	err := d.conn.QueryRow("SELECT timestamp FROM logs ORDER BY id DESC LIMIT 1").Scan(&ts)
+	if err != nil {
+		return ""
+	}
+	return ts
+}
+
 // Cleanup enforces retention policy: keeps max N logs and max M sessions
 func (d *DB) Cleanup(cfg RetentionConfig) error {
 	// First, delete oldest sessions if we exceed max
@@ -385,13 +394,7 @@ func (d *DB) Cleanup(cfg RetentionConfig) error {
 		}
 	}
 
-	// Reclaim freed pages so the db file doesn't grow unbounded over delete cycles.
-	// VACUUM rewrites the db; wal_checkpoint(TRUNCATE) then shrinks the WAL file.
-	if _, err := d.conn.Exec("VACUUM"); err != nil {
-		return err
-	}
-	_, err := d.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-	return err
+	return nil
 }
 
 // deleteOldestSessions removes sessions beyond the max count, keeping the newest ones
