@@ -343,11 +343,7 @@ func (w *Watcher) ClearDeviceLogs() error {
 	serial := w.deviceSerial
 	w.mu.Unlock()
 
-	args := []string{"logcat", "-c"}
-	if serial != "" && serial != "No device connected" {
-		args = append([]string{"-s", serial}, args...)
-	}
-	return exec.Command("adb", args...).Run()
+	return w.adb.ClearLogs(serial)
 }
 
 type WatcherInfo struct {
