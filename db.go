@@ -378,6 +378,10 @@ func (d *DB) GetLastTimestamp() string {
 	return ts
 }
 
+func (d *DB) Close() error {
+	return d.conn.Close()
+}
+
 // Cleanup enforces retention policy: keeps max N logs and max M sessions
 func (d *DB) Cleanup(cfg RetentionConfig) error {
 	// First, delete oldest sessions if we exceed max

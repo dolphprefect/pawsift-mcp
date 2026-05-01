@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -16,10 +17,65 @@ import (
 
 var logPattern = regexp.MustCompile(`^(\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(.*?)\s*:\s+(.*)$`)
 
+// LogStream abstracts a logcat output stream
+type LogStream interface {
+	io.ReadCloser
+	Wait() error
+}
+
+// AdbRunner abstracts interaction with the adb executable
+type AdbRunner interface {
+	GetSerial() (string, error)
+	StreamLogs(ctx context.Context, serial string) (LogStream, error)
+	ClearLogs(serial string) error
+}
+
+// RealAdbRunner is the production implementation using exec.Command
+type RealAdbRunner struct{}
+
+func (r *RealAdbRunner) GetSerial() (string, error) {
+	out, err := exec.Command("adb", "get-serialno").Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+type realLogStream struct {
+	io.ReadCloser
+	cmd *exec.Cmd
+}
+
+func (s *realLogStream) Wait() error {
+	return s.cmd.Wait()
+}
+
+func (r *RealAdbRunner) StreamLogs(ctx context.Context, serial string) (LogStream, error) {
+	args := []string{"logcat", "-v", "threadtime"}
+	if serial != "" && serial != "No device connected" {
+		args = append([]string{"-s", serial}, args...)
+	}
+	cmd := exec.CommandContext(ctx, "adb", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &realLogStream{ReadCloser: stdout, cmd: cmd}, nil
+}
+
+func (r *RealAdbRunner) ClearLogs(serial string) error {
+	args := []string{"logcat", "-c"}
+	if serial != "" && serial != "No device connected" {
+		args = append([]string{"-s", serial}, args...)
+	}
+	return exec.Command("adb", args...).Run()
+}
+
 type Watcher struct {
 	targetPackage  string
 	currentSession int
 	db             *DB
+	adb            AdbRunner
 	lastTimestamp  string
 	lastSeenKeys   map[string]bool
 	lastEntryID    int64
@@ -28,23 +84,25 @@ type Watcher struct {
 	lastPoll       time.Time
 	isStarted      bool
 	retention      RetentionConfig
-	cmd            *exec.Cmd
+	cmd            LogStream
 	isAdbRunning   bool
 	isCleaning     atomic.Bool
 	mu             sync.Mutex
 }
 
-func NewWatcher(db *DB) *Watcher {
+func NewWatcher(db *DB, adb AdbRunner) *Watcher {
 	w := &Watcher{
 		db:            db,
+		adb:           adb,
 		lastSeenKeys:  map[string]bool{},
 		retention:     DefaultRetentionConfig,
 		lastTimestamp: db.GetLastTimestamp(),
 	}
-	out, _ := exec.Command("adb", "get-serialno").Output()
-	w.deviceSerial = strings.TrimSpace(string(out))
-	if w.deviceSerial == "unknown" || w.deviceSerial == "" {
+	serial, err := adb.GetSerial()
+	if err != nil || serial == "unknown" || serial == "" {
 		w.deviceSerial = "No device connected"
+	} else {
+		w.deviceSerial = serial
 	}
 	return w
 }
@@ -85,28 +143,19 @@ func (w *Watcher) streamWithRetry(ctx context.Context) error {
 	localCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	args := []string{"logcat", "-v", "threadtime"}
-	if w.deviceSerial != "" && w.deviceSerial != "No device connected" {
-		args = append([]string{"-s", w.deviceSerial}, args...)
-	}
-	cmd := exec.CommandContext(localCtx, "adb", args...)
-	stdout, err := cmd.StdoutPipe()
+	stream, err := w.adb.StreamLogs(localCtx, w.deviceSerial)
 	if err != nil {
 		return err
 	}
 
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
 	w.mu.Lock()
-	w.cmd = cmd
+	w.cmd = stream
 	w.isAdbRunning = true
 	w.mu.Unlock()
 
 	done := make(chan error, 1)
 	go func() {
-		err := cmd.Wait()
+		err := stream.Wait()
 		w.mu.Lock()
 		w.isAdbRunning = false
 		w.mu.Unlock()
@@ -114,7 +163,7 @@ func (w *Watcher) streamWithRetry(ctx context.Context) error {
 	}()
 
 	lines := make(chan string, 100)
-	scanner := bufio.NewScanner(stdout)
+	scanner := bufio.NewScanner(stream)
 	go func() {
 		for scanner.Scan() {
 			select {
@@ -137,7 +186,13 @@ func (w *Watcher) streamWithRetry(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case err := <-done:
-			return fmt.Errorf("adb process exited: %w", err)
+			// If context is canceled, we don't care about the exit error
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				return fmt.Errorf("adb process exited: %w", err)
+			}
 		case <-cleanupTicker.C:
 			w.mu.Lock()
 			retention := w.retention
