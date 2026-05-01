@@ -7,13 +7,21 @@ CLAUDE_CODE_CONFIG=$(HOME)/.claude.json
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 VERSION    := $(shell grep 'Version = ' main.go | sed 's/.*"\(.*\)".*/\1/')
 
-.PHONY: all build build-all clean install deploy register uninstall release
+.PHONY: all build test test-race build-all clean install deploy register uninstall release
 
 all: build
 
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@go build -o $(BUILD_DIR)/$(BINARY_NAME) .
+
+test:
+	@echo "Running tests..."
+	@go test ./... -v -count=1 -timeout 120s
+
+test-race: test
+	@echo "Running tests with race detector..."
+	@go test ./... -race -count=1 -timeout 120s
 
 build-all:
 	@echo "Building $(BINARY_NAME) for all platforms..."

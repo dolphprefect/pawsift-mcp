@@ -125,3 +125,33 @@ func TestFoldLogEntries(t *testing.T) {
 		t.Errorf("Expected first folded entry StartID 1, got %d", folded[0].StartID)
 	}
 }
+
+func TestWALModeAndSynchronousPragma(t *testing.T) {
+	// WAL mode requires a file-backed database; :memory: returns "memory"
+	dbPath := t.TempDir() + "/test.db"
+	db, err := InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer db.Close()
+
+	// Verify journal_mode is WAL
+	var journalMode string
+	err = db.conn.QueryRow("PRAGMA journal_mode;").Scan(&journalMode)
+	if err != nil {
+		t.Fatalf("Failed to query journal_mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Errorf("Expected journal_mode to be 'wal', got %q", journalMode)
+	}
+
+	// Verify synchronous is NORMAL (1)
+	var syncMode int
+	err = db.conn.QueryRow("PRAGMA synchronous;").Scan(&syncMode)
+	if err != nil {
+		t.Fatalf("Failed to query synchronous: %v", err)
+	}
+	if syncMode != 1 {
+		t.Errorf("Expected synchronous to be 1 (NORMAL), got %d", syncMode)
+	}
+}

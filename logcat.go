@@ -4,18 +4,17 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-var logPattern = regexp.MustCompile(`^(\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(.*?)\s*:\s+(.*)$`)
+var lineHashSeed = maphash.MakeSeed()
 
 // LogStream abstracts a logcat output stream
 type LogStream interface {
@@ -77,7 +76,7 @@ type Watcher struct {
 	db             *DB
 	adb            AdbRunner
 	lastTimestamp  string
-	lastSeenKeys   map[string]bool
+	lastSeenKeys   map[uint64]bool
 	lastEntryID    int64
 	lastEntryKey   string
 	deviceSerial   string
@@ -94,7 +93,7 @@ func NewWatcher(db *DB, adb AdbRunner) *Watcher {
 	w := &Watcher{
 		db:            db,
 		adb:           adb,
-		lastSeenKeys:  map[string]bool{},
+		lastSeenKeys:  map[uint64]bool{},
 		retention:     DefaultRetentionConfig,
 		lastTimestamp: db.GetLastTimestamp(),
 	}
@@ -162,7 +161,7 @@ func (w *Watcher) streamWithRetry(ctx context.Context) error {
 		done <- err
 	}()
 
-	lines := make(chan string, 100)
+	lines := make(chan string, 10000)
 	scanner := bufio.NewScanner(stream)
 	go func() {
 		for scanner.Scan() {
@@ -232,47 +231,129 @@ func (w *Watcher) streamWithRetry(ctx context.Context) error {
 	}
 }
 
+func parseLogLine(line string) (ts string, pid, tid int, level, tag, msg string, ok bool) {
+	n := len(line)
+	if n < 18 {
+		return
+	}
+
+	// Timestamp: "MM-DD HH:MM:SS.mmm" at position 0-17 (fixed-width in threadtime format)
+	ts = line[:18]
+	idx := 18
+
+	// Skip spaces to PID
+	for idx < n && line[idx] == ' ' {
+		idx++
+	}
+	pidStart := idx
+	for idx < n && line[idx] >= '0' && line[idx] <= '9' {
+		idx++
+	}
+	if pidStart == idx {
+		return
+	}
+	pid = fastAtoi(line[pidStart:idx])
+
+	// Skip spaces to TID
+	for idx < n && line[idx] == ' ' {
+		idx++
+	}
+	tidStart := idx
+	for idx < n && line[idx] >= '0' && line[idx] <= '9' {
+		idx++
+	}
+	if tidStart == idx {
+		return
+	}
+	tid = fastAtoi(line[tidStart:idx])
+
+	// Skip spaces to LEVEL
+	for idx < n && line[idx] == ' ' {
+		idx++
+	}
+	if idx >= n {
+		return
+	}
+	lvl := line[idx]
+	if lvl != 'V' && lvl != 'D' && lvl != 'I' && lvl != 'W' && lvl != 'E' && lvl != 'F' {
+		return
+	}
+	level = string(lvl)
+	idx++
+
+	// Skip spaces to TAG
+	for idx < n && line[idx] == ' ' {
+		idx++
+	}
+	if idx >= n {
+		return
+	}
+	tagStart := idx
+
+	// Find ": " to split TAG and MESSAGE
+	colonIdx := strings.Index(line[tagStart:], ": ")
+	if colonIdx < 0 {
+		return
+	}
+	tag = strings.TrimSpace(line[tagStart : tagStart+colonIdx])
+	if tag == "" {
+		return
+	}
+	msg = line[tagStart+colonIdx+2:]
+
+	ok = true
+	return
+}
+
+// fastAtoi converts a digit-only string to int. Returns 0 on overflow.
+func fastAtoi(s string) int {
+	const maxInt = int(^uint(0) >> 1)
+	n := 0
+	for i := 0; i < len(s); i++ {
+		d := int(s[i] - '0')
+		if n > maxInt/10 {
+			return 0
+		}
+		n = n*10 + d
+	}
+	return n
+}
+
+func hashLine(line string) uint64 {
+	return maphash.String(lineHashSeed, line)
+}
+
 func (w *Watcher) processLine(line string) bool {
-	matches := logPattern.FindStringSubmatch(line)
-	if len(matches) < 7 {
+	ts, pid, tid, level, tag, msg, ok := parseLogLine(line)
+	if !ok {
 		return false
 	}
 
-	ts := matches[1]
 	w.mu.Lock()
 
 	if ts < w.lastTimestamp {
 		w.mu.Unlock()
 		return false
 	}
-	if ts == w.lastTimestamp && w.lastSeenKeys[line] {
-		w.mu.Unlock()
-		return false
-	}
-	if ts > w.lastTimestamp {
+	if ts == w.lastTimestamp {
+		h := hashLine(line)
+		if w.lastSeenKeys[h] {
+			w.mu.Unlock()
+			return false
+		}
+		w.lastSeenKeys[h] = true
+	} else {
 		w.lastTimestamp = ts
 		clear(w.lastSeenKeys)
+		h := hashLine(line)
+		w.lastSeenKeys[h] = true
 	}
-	w.lastSeenKeys[line] = true
+
 	pkg := w.targetPackage
 	sessionID := w.currentSession
 
-	level := matches[4]
-	tag := strings.TrimSpace(matches[5])
-	message := matches[6]
-	pid, err := strconv.Atoi(matches[2])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: PID overflow or parse error: %v. Falling back to 0.\n", err)
-		pid = 0
-	}
-	tid, err := strconv.Atoi(matches[3])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: TID overflow or parse error: %v. Falling back to 0.\n", err)
-		tid = 0
-	}
-
-	isRestart := (tag == "ActivityManager" || tag == "ActivityTaskManager") && pkg != "" && strings.Contains(message, pkg) &&
-		(strings.Contains(message, "Start proc") || strings.Contains(message, "Killing") || strings.Contains(message, "Force stopping"))
+	isRestart := (tag == "ActivityManager" || tag == "ActivityTaskManager") && pkg != "" && strings.Contains(msg, pkg) &&
+		(strings.Contains(msg, "Start proc") || strings.Contains(msg, "Killing") || strings.Contains(msg, "Force stopping"))
 
 	if isRestart {
 		w.currentSession++
@@ -290,7 +371,7 @@ func (w *Watcher) processLine(line string) bool {
 	// into a single DB entry — captures full exception stack traces as one record.
 	entryKey := fmt.Sprintf("%d|%s|%s|%d|%d|%s", sessionID, level, tag, pid, tid, ts)
 	if lastID != 0 && entryKey == lastKey {
-		_ = w.db.AppendToLog(lastID, message)
+		_ = w.db.AppendToLog(lastID, msg)
 		return true
 	}
 
@@ -301,7 +382,7 @@ func (w *Watcher) processLine(line string) bool {
 		Tag:       tag,
 		PID:       pid,
 		TID:       tid,
-		Message:   message,
+		Message:   msg,
 	}
 
 	id, _ := w.db.InsertLog(entry)
