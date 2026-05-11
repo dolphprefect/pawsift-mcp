@@ -142,7 +142,23 @@ func (w *Watcher) streamWithRetry(ctx context.Context) error {
 	localCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	stream, err := w.adb.StreamLogs(localCtx, w.deviceSerial)
+	w.mu.Lock()
+	serial := w.deviceSerial
+	w.mu.Unlock()
+
+	if serial == "" || serial == "No device connected" {
+		newSerial, err := w.adb.GetSerial()
+		if err != nil || newSerial == "unknown" || newSerial == "" {
+			return fmt.Errorf("no device connected")
+		}
+		w.mu.Lock()
+		w.deviceSerial = newSerial
+		serial = newSerial
+		w.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "LOG: Device detected: %s\n", serial)
+	}
+
+	stream, err := w.adb.StreamLogs(localCtx, serial)
 	if err != nil {
 		return err
 	}
