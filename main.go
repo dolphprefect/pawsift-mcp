@@ -12,7 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const Version = "2.1.0"
+const Version = "2.1.1"
 
 func renderLogEntries(sb *strings.Builder, entries []LogEntry, centerID int64) {
 	lastHeader := ""
